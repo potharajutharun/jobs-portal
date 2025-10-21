@@ -1,0 +1,135 @@
+name: Next.js Full AWS Deployment
+
+# Trigger workflow on pushes to the main branch
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest  # Use latest Ubuntu runner
+    
+    # Permissions needed for secure authentication and repository access
+    permissions:
+      id-token: write  # Required if using OIDC (OpenID Connect) for AWS
+      contents: read   # Needed to checkout code
+
+    # Global environment variables for workflow
+    env:
+      NODE_ENV: production  # Ensure Next.js builds in production mode
+      NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }} # Example Next.js env var
+
+    steps:
+      # 1️⃣ Checkout repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        # Fetches your GitHub repo code so workflow can build & deploy it
+
+      # 2️⃣ Cache node_modules for faster builds
+      - name: Cache node modules
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+        # Caches dependencies to avoid reinstalling them every run
+
+      # 3️⃣ Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'  # Use Node.js 20
+          cache: 'npm'         # Enable npm caching
+
+      # 4️⃣ Install project dependencies
+      - name: Install dependencies
+        run: npm install
+        # Installs all npm packages required for building the Next.js app
+
+      # 5️⃣ Lint the code (optional but recommended)
+      - name: Lint code
+        run: npm run lint
+        # Ensures code follows project linting rules
+
+      # 6️⃣ Run tests (optional but recommended)
+      - name: Run tests
+        run: npm test
+        # Executes project tests to catch errors before deployment
+
+      # 7️⃣ Build Next.js application
+      - name: Build Next.js app
+        run: npm run build
+        # Generates production-ready build of Next.js app
+
+      # 8️⃣ Configure AWS credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        # Sets up AWS CLI with credentials for all subsequent AWS commands
+
+      # 9️⃣ Create or check RDS instance
+      - name: Create or Check RDS instance
+        run: |
+          # Check if the DB instance already exists
+          INSTANCE_EXISTS=$(aws rds describe-db-instances \
+            --db-instance-identifier my-nextjs-db \
+            --region ${{ secrets.AWS_REGION }} \
+            --query 'DBInstances[0].DBInstanceIdentifier' \
+            --output text 2>/dev/null || echo "not-found")
+
+          if [ "$INSTANCE_EXISTS" = "not-found" ]; then
+            echo "Creating new RDS instance..."
+            aws rds create-db-instance \
+              --db-name ${{ secrets.DB_NAME }} \
+              --db-instance-identifier my-nextjs-db \
+              --engine mysql \
+              --master-username ${{ secrets.DB_USERNAME }} \
+              --master-user-password ${{ secrets.DB_PASSWORD }} \
+              --allocated-storage 20 \
+              --db-instance-class db.t3.micro \
+              --backup-retention-period 7 \
+              --publicly-accessible \
+              --region ${{ secrets.AWS_REGION }}
+          else
+            echo "RDS instance already exists."
+          fi
+        # Ensures the database exists before deployment
+
+      # 🔟 Run database migrations
+      - name: Run DB migrations
+        run: npm run migrate
+        # Applies schema updates or seed data to the database
+
+      # 1️⃣1️⃣ Package the application for Elastic Beanstalk
+      - name: Create deployment package
+        run: zip -r app.zip . -x "*.git*" "node_modules/*"
+        # Creates a zip file of the app excluding git metadata & node_modules
+
+      # 1️⃣2️⃣ Deploy app to Elastic Beanstalk
+      - name: Deploy to Elastic Beanstalk
+        uses: aws-actions/elastic-beanstalk-deploy@v2
+        with:
+          application_name: ${{ secrets.EB_APPLICATION_NAME }}
+          environment_name: ${{ secrets.EB_ENVIRONMENT_NAME }}
+          version_label: v-${{ github.sha }}  # Unique version using commit SHA
+          deployment_package: app.zip
+          region: ${{ secrets.AWS_REGION }}
+        # Pushes the build to AWS Elastic Beanstalk environment
+
+      # 1️⃣3️⃣ Wait until EB environment is healthy
+      - name: Wait for EB environment
+        run: |
+          aws elasticbeanstalk wait environment-health-ok \
+            --environment-name ${{ secrets.EB_ENVIRONMENT_NAME }} \
+            --region ${{ secrets.AWS_REGION }}
+        # Ensures deployment has completed and EB environment is healthy
+
+      # 1️⃣4️⃣ Notify deployment success
+      - name: Deployment Success
+        run: echo "Next.js app deployed successfully to AWS Elastic Beanstalk!"
+        # Simple confirmation message in workflow logs
+  
